@@ -229,5 +229,5 @@ sessions over a single config, no auto-VACUUM, …).
 
 ```bash
 ./nm uninstall                # remove launchd jobs, keep the data
-rm -rf /Users/swarad/Work/netmonitor   # nuke everything
+rm -rf "$(pwd)"                # nuke everything (run from the repo root)
 ```
