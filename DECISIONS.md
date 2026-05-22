@@ -115,8 +115,8 @@ LAN." Treating CGNAT as ISP-side is intentional — it *is* ISP infrastructure.
 
 **Why templated plists (`.plist.template`)?**
 - The plist needs absolute paths for the Python interpreter and the project
-  directory. Hardcoding made the original setup non-portable (only worked on
-  `/Users/swarad/Work/netmonitor`).
+  directory. Hardcoding made the original setup non-portable (it only worked
+  from the original author's checkout path).
 - Templates use `{{NETMONITOR_DIR}}` and `{{PYTHON_BIN}}` placeholders; the
   install script sed-substitutes the real values from the running shell.
 - Side benefit: the rendered plist in `~/Library/LaunchAgents` is the "real"
