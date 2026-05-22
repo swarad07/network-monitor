@@ -48,6 +48,7 @@ SELECT
   '  label:    ' || label || char(10) ||
   '  city:     ' || COALESCE(city,'—') || ', ' || COALESCE(region,'—') || ', ' || COALESCE(country,'—') || char(10) ||
   '  isp:      ' || COALESCE(isp,'—') || char(10) ||
+  '  asn:      ' || COALESCE(asn,'—') || char(10) ||
   '  public_ip:' || COALESCE(public_ip,'—') || char(10) ||
   '  gateway:  ' || COALESCE(gateway_ip,'—') || char(10) ||
   '  isp_edge: ' || COALESCE(isp_edge_ip,'—') || char(10) ||
