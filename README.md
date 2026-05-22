@@ -63,6 +63,27 @@ networks in the window.
 `init_db` keeps old data safe across schema changes by renaming legacy tables
 (`probes_legacy_v1`) rather than dropping them.
 
+## Platform support
+
+**macOS only**, today. The monitor leans on a handful of BSD/Apple-specific
+commands and on `launchd` for lifecycle management:
+
+| Layer        | Why it's macOS-only                                                              |
+| ------------ | -------------------------------------------------------------------------------- |
+| Discovery    | `route -n get default`, `ipconfig getsummary`, `arp -n` (BSD flags / macOS-only) |
+| Probing      | `ping -W <ms>` uses macOS-style milliseconds (Linux `-W` is seconds)             |
+| Scheduling   | `launchd` plists for the monitor / cleanup / dashboard jobs                      |
+| Sleep policy | `pmset -c disablesleep` to keep the daemon alive lid-closed                      |
+
+**Linux** is a straightforward port but not implemented: replace
+`route -n get default` → `ip route show default`, `ipconfig getsummary` →
+`iw dev <iface> link` for SSID, fix the `ping -W` units, and swap `launchd`
+plists for a systemd user unit + timer. PRs welcome.
+
+**Windows is not supported and there are no plans to port.** The ping CLI
+contract, network discovery, and scheduling layers are all too different —
+it would be a rewrite, not a port.
+
 ## Quick start
 
 ```bash
@@ -218,8 +239,8 @@ Apple enforces clamshell sleep on battery — no override there.
 - **No alerting / notifications.** This is a measurement tool, not a pager.
 - **No multi-host coordination.** One machine, one DB.
 - **No PDF/report export.** Screenshots of the dashboard *are* the report.
-- **No Linux port yet.** Uses `route -n get default`, `ipconfig getsummary`,
-  `pmset`. Trivial to port (`ip route`, `iw dev`) — just not done.
+- **No cross-platform support.** macOS-only by design today (see *Platform
+  support* above).
 
 See [`DECISIONS.md`](DECISIONS.md) for the full *why* behind every
 non-obvious choice (probe interval, SQLite over Postgres, vendored Plotly,
@@ -231,3 +252,13 @@ sessions over a single config, no auto-VACUUM, …).
 ./nm uninstall                # remove launchd jobs, keep the data
 rm -rf "$(pwd)"                # nuke everything (run from the repo root)
 ```
+
+## License
+
+Released under the [PolyForm Noncommercial License 1.0.0](LICENSE) — free to
+use, modify, and share for any noncommercial purpose (personal, academic,
+research, non-profit) with attribution. **Commercial use is not permitted.**
+
+PolyForm Noncommercial is purpose-built for source-available software with
+this exact intent. If you have a commercial use case, open an issue to
+discuss a separate license.
