@@ -1392,7 +1392,7 @@ function renderHeatmap(d){
   const trace = {
     type:"heatmap", x: xs, y: LAYERS_TOP_DOWN.map(l => LAYER_DISPLAY[l]), z,
     zmin:0, zmax:1, showscale:false,
-    colorscale: [[0,"#16A34A"], [0.5,"#D97706"], [1,"#DC2626"]],
+    colorscale: [[0,"#16A34A"], [0.5,"#FBBF24"], [1,"#DC2626"]],
     hovertemplate: "%{y}<br>%{x}<br>down: %{z:.0%}<extra></extra>",
     xgap:0, ygap:2,
   };
