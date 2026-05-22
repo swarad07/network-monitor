@@ -1,0 +1,22 @@
+# Runtime data — never commit
+netmonitor.db
+netmonitor.db-shm
+netmonitor.db-wal
+backups/
+
+# launchd logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor
+.DS_Store
+.vscode/
+.idea/
+
+# Vendored Plotly (4.5 MB, downloaded by setup; see DECISIONS.md)
+static/plotly.min.js

@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# nm — netmonitor control. Single entry point to every helper script.
+
+set -euo pipefail
+HERE="$(cd "$(dirname "$0")" && pwd)"
+CMD="${1:-help}"
+shift || true
+
+case "$CMD" in
+    setup)      exec "$HERE/bin/setup.sh" "$@" ;;
+    install)    exec "$HERE/bin/install.sh" "$@" ;;
+    uninstall)  exec "$HERE/bin/uninstall.sh" "$@" ;;
+    reload)     exec "$HERE/bin/reload.sh" "$@" ;;
+    status)     exec "$HERE/bin/status.sh" "$@" ;;
+    storage)    exec "$HERE/bin/storage.sh" "$@" ;;
+    cleanup)    exec "$HERE/bin/cleanup.sh" "$@" ;;
+    vacuum)     exec "$HERE/bin/vacuum.sh" "$@" ;;
+    dashboard)  exec "$HERE/bin/dashboard.sh" "$@" ;;
+    logs)       exec "$HERE/bin/logs.sh" "$@" ;;
+    backup)     exec "$HERE/bin/backup.sh" "$@" ;;
+    help|-h|--help|"")
+        cat <<'EOF'
+nm — netmonitor control
+
+USAGE
+  ./nm <command> [args]
+
+COMMANDS
+  setup                        Download vendored runtime assets (Plotly bundle)
+  install [--with-dashboard]   Install launchd jobs (monitor + cleanup,
+                               optionally dashboard on port 8080)
+  uninstall                    Remove all launchd jobs (DB and logs kept)
+  reload [monitor|cleanup|dashboard|all]
+                               Restart a service (default: monitor)
+  status                       Daemon health, recent activity, current session
+  storage                      DB size, row counts, retention info
+  cleanup                      Run retention cleanup now (delete >8w probes)
+  vacuum                       Reclaim disk space (briefly pauses daemon)
+  dashboard                    Start dashboard in foreground (Ctrl+C to stop)
+  logs [monitor|cleanup|dashboard|all]
+                               Tail a log file
+  backup                       Snapshot DB to backups/ (online-safe)
+
+FILES
+  monitor.py     daemon — pings LAN/ISP-edge/WAN every 5s
+  app.py         Flask dashboard (port 8080)
+  cleanup.py     retention enforcement
+  netmonitor.db  SQLite store
+  bin/           individual scripts (or invoke directly)
+  launchd/       plist templates rendered by `install`
+
+See DECISIONS.md for design rationale, README.md for setup walkthrough.
+EOF
+        ;;
+    *)
+        echo "unknown command: $CMD"
+        echo "run './nm help' for usage"
+        exit 2
+        ;;
+esac
