@@ -171,7 +171,7 @@ self-contained and invokable directly.
 
 ```sql
 sessions(id, start_ts, end_ts, gateway_ip, gateway_mac, interface, ssid,
-         isp_edge_ip, public_ip, isp, city, region, country, label)
+         isp_edge_ip, public_ip, isp, asn, city, region, country, label)
 
 probes(ts, session_id, layer, target, success, rtt_ms)
 INDEX probes(ts), probes(session_id), probes(layer)
@@ -211,17 +211,35 @@ netmonitor/
 └── CLAUDE.md                   # notes for future AI sessions on this repo
 ```
 
-## Keeping it running when the lid closes
+## Where to run it
 
-`launchd` keeps the monitor up across crashes and reboots, but macOS still
-sleeps the machine when you close the lid. On AC power you can override:
+The value of the data scales with how continuous it is, so think about *where*
+this lives before you install.
+
+**Best deployment — a small always-on machine on your home network.** A Mac
+mini you've retired, a spare laptop docked lid-open, or any Mac that lives
+plugged-in and awake. It probes 24×7 without you thinking about it, your
+working laptop stays free, and the dataset is unbroken when an outage finally
+happens at 3 AM and you want to point at it the next morning.
+
+**Also fine — your work laptop, alongside everything else you do.** The
+monitor is stdlib Python, sleeps between pings, and consumes ~0% CPU and a
+few MB of RAM in steady state. It runs invisibly under `launchd` and won't
+affect your work. The only catch is sleep: macOS pauses the daemon when the
+lid closes or the machine sleeps, so probe history has gaps that mirror your
+usage pattern. Useful for catching outages while you're at the desk; less
+useful for *"what happened overnight."*
+
+On AC power you can override sleep:
 
 ```bash
 sudo pmset -c disablesleep 1   # disable sleep on AC (use sparingly)
 sudo pmset -c disablesleep 0   # revert
 ```
 
-Apple enforces clamshell sleep on battery — no override there.
+Apple enforces clamshell sleep on battery — no override there. If you want
+true 24×7 coverage from a laptop, run it lid-open or with an external display
+attached.
 
 ## Troubleshooting
 
@@ -233,6 +251,33 @@ Apple enforces clamshell sleep on battery — no override there.
 | ISP-edge row stays blank in the heatmap          | First non-LAN hop drops ICMP. Re-discovered every ~30 min.           |
 | Geolocation shows the wrong city                 | `ip-api.com` is approximate. Use the ISP name + public IP from the session card instead. |
 | Charts render blank but the JSON looks fine      | Your ISP may be MITM-ing `cdn.plot.ly`. Run `./nm setup` to vendor Plotly locally. |
+
+## What this can't tell you
+
+The attribution is honest about what it sees, which means it's also honest
+about what it doesn't.
+
+- **It's a single vantage point.** All three layers are probed from one host.
+  If LAN, ISP edge, *and* WAN all show packet loss at the same moment, this
+  tool can't disambiguate "my Mac's network stack briefly wedged" from "every
+  device in the house lost connectivity." A second probe on the same LAN
+  (phone, Pi) would harden the claim; this tool by itself can't. The
+  three-layer split is still strong evidence in practice, because the LAN
+  layer staying green during ISP/WAN loss is exactly the asymmetric signal
+  that points at the ISP — but be aware of the limit.
+- **The ISP name comes from `ip-api.com`, not your billing relationship.**
+  It's the carrier announcing your public IP via BGP, which is usually your
+  ISP but isn't guaranteed to match the name on your invoice (wholesale
+  arrangements, CGNAT, business uplinks all complicate this). The session
+  also records the ASN (e.g., `AS7922 Comcast Cable Communications, LLC`)
+  and your public IP — those are ground-truth and harder to dispute than the
+  city/ISP labels.
+- **Geolocation is approximate.** City/region come from a free IP database
+  and can be wrong by tens or hundreds of kilometres, especially for mobile
+  carriers and CGNAT. Treat the location as a label, not a measurement.
+- **Gaps in the timeline mean "no data," not "no outage."** If the daemon
+  was off — laptop asleep, machine rebooting, daemon crashed — the gap is
+  silent. The heatmap shows it as missing; that's not the same as "uptime."
 
 ## Deliberately out of scope
 
