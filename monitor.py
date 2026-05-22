@@ -22,6 +22,9 @@ ISP_EDGE_REDISCOVER_EVERY = 360       # re-traceroute every ~30min in case ISP e
 PING_TIMEOUT_SEC = 2
 DB_PATH = Path(__file__).parent / "netmonitor.db"
 GEO_API = "http://ip-api.com/json/?fields=status,country,regionName,city,isp,as,query"
+# ip-api returns `as` as a single string like "AS15169 Google LLC" — keep it
+# as-is. ASN + AS name is the ground-truth ISP identifier (the city name is
+# approximate and the ISP name is a marketing label; both can be disputed).
 WAN_TARGETS = ["1.1.1.1", "8.8.8.8"]
 RTT_RE = re.compile(r"time[=<]([\d.]+)\s*ms")
 # 100.64/10 is CGNAT — still ISP infrastructure but private-ish. Treat as LAN-side
@@ -120,6 +123,7 @@ class Topology:
     isp_edge_ip: str | None = None
     public_ip: str | None = None
     isp: str | None = None
+    asn: str | None = None
     city: str | None = None
     region: str | None = None
     country: str | None = None
@@ -139,6 +143,7 @@ def discover() -> Topology:
     geo = geolocate()
     t.public_ip = geo.get("query")
     t.isp = geo.get("isp")
+    t.asn = geo.get("as")
     t.city = geo.get("city")
     t.region = geo.get("regionName")
     t.country = geo.get("country")
@@ -161,6 +166,10 @@ def init_db(conn: sqlite3.Connection) -> None:
         cols_ok = {"session_id", "layer"}.issubset(cols)
         if not cols_ok:
             conn.executescript("ALTER TABLE probes RENAME TO probes_legacy_v1;")
+    if "sessions" in tables:
+        scols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+        if "asn" not in scols:
+            conn.executescript("ALTER TABLE sessions ADD COLUMN asn TEXT;")
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS sessions (
@@ -174,6 +183,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             isp_edge_ip TEXT,
             public_ip   TEXT,
             isp         TEXT,
+            asn         TEXT,
             city        TEXT,
             region      TEXT,
             country     TEXT,
@@ -200,11 +210,11 @@ def open_session(conn: sqlite3.Connection, t: Topology) -> int:
     cur = conn.execute(
         """
         INSERT INTO sessions (start_ts, gateway_ip, gateway_mac, interface, ssid,
-                              isp_edge_ip, public_ip, isp, city, region, country, label)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                              isp_edge_ip, public_ip, isp, asn, city, region, country, label)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         (int(time.time()), t.gateway_ip, t.gateway_mac, t.interface, t.ssid,
-         t.isp_edge_ip, t.public_ip, t.isp, t.city, t.region, t.country, t.label),
+         t.isp_edge_ip, t.public_ip, t.isp, t.asn, t.city, t.region, t.country, t.label),
     )
     conn.commit()
     return cur.lastrowid
@@ -245,7 +255,7 @@ def print_topo(session_id: int, t: Topology) -> None:
     print(f"[netmonitor] session {session_id}: {t.label}")
     print(f"  gateway={t.gateway_ip} mac={t.gateway_mac} iface={t.interface} ssid={t.ssid}")
     print(f"  isp_edge={t.isp_edge_ip} public_ip={t.public_ip} isp={t.isp} "
-          f"city={t.city} region={t.region} country={t.country}", flush=True)
+          f"asn={t.asn} city={t.city} region={t.region} country={t.country}", flush=True)
 
 
 def close_dangling_sessions(conn: sqlite3.Connection) -> None:
