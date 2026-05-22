@@ -1252,6 +1252,7 @@ function renderSessionInfo(d){
     ["Network",    `<span class="v label">${d.current_network_label || "—"}</span>`],
     ["City",       [s.city, s.region, s.country].filter(Boolean).join(", ") || "—"],
     ["Public IP",  s.public_ip || "—"],
+    ["ASN",        s.asn || "—"],
     ["Gateway",    s.gateway_ip || "—"],
     ["ISP edge",   s.isp_edge_ip || "—"],
     ["SSID",       s.ssid || "(wired)"],
