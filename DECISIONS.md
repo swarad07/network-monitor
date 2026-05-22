@@ -63,6 +63,15 @@ later.
   needs a free token) or skip geolocation entirely (the ISP name from the AS
   lookup is enough for our purposes).
 
+**Why store the ASN as a single string (`AS7922 Comcast …`) and not split into number + name?**
+That's the shape `ip-api.com` returns it in, and that's the canonical way ASNs
+are cited (in BGP tables, in support tickets, in RIR registries). Splitting on
+the first space would work today but adds parsing brittleness for zero benefit
+— nothing downstream queries by ASN number, and a human eyeballing a session
+row wants both halves together anyway. The point of capturing this at all is
+that ASN + public IP is the one piece of attribution an ISP can't dispute
+(unlike the city label or the marketing ISP name).
+
 **Why traceroute for ISP-edge discovery, not a hardcoded "next hop"?**
 We don't know what the user's network looks like — pure-routed, CGNAT
 (`100.64/10`), bridged modem with public IP on the WAN interface, etc.
@@ -104,6 +113,17 @@ LAN." Treating CGNAT as ISP-side is intentional — it *is* ISP infrastructure.
 - Existing data is valuable (especially the outage history for the ISP call).
 - `init_db` in `monitor.py` detects old schemas and renames the legacy table
   rather than dropping it (`probes_legacy_v1`). New schema is created beside it.
+
+**Why does the `asn` column migration use `ALTER TABLE ADD COLUMN` instead of
+the rename-legacy pattern?**
+The rename pattern (`probes` → `probes_legacy_v1`) exists for *incompatible*
+schema changes — e.g., adding `session_id` retroactively, where old rows have
+no sensible value and can't be re-attached to the new model. Adding `asn` is
+purely additive: every existing session row stays valid with `NULL` in the
+new column, and new sessions populate it going forward. `ALTER TABLE ADD
+COLUMN` preserves all history with no rename, no migration script, no parallel
+table to reconcile. Reserve the rename pattern for changes that genuinely
+break the old row shape.
 
 ## Orchestration
 
