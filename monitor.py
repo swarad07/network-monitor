@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -26,6 +27,11 @@ GEO_API = "http://ip-api.com/json/?fields=status,country,regionName,city,isp,as,
 # as-is. ASN + AS name is the ground-truth ISP identifier (the city name is
 # approximate and the ISP name is a marketing label; both can be disputed).
 WAN_TARGETS = ["1.1.1.1", "8.8.8.8"]
+# L7 probes — confirm DNS + TLS + HTTPS path actually works. Catches brownouts
+# where ICMP to anycast IPs still answers but DNS, TLS or upstream routing is
+# broken. Pick two operators on different networks.
+WEB_TARGETS = ["https://www.cloudflare.com/", "https://www.google.com/"]
+WEB_TIMEOUT_SEC = 4
 RTT_RE = re.compile(r"time[=<]([\d.]+)\s*ms")
 # 100.64/10 is CGNAT — still ISP infrastructure but private-ish. Treat as LAN-side
 # for discovery (so we keep walking past it) only if it's the very first hop.
@@ -239,15 +245,37 @@ def ping_once(target: str) -> tuple[int, float | None]:
     return 0, None
 
 
+def web_probe_once(url: str) -> tuple[int, float | None]:
+    """HTTPS HEAD probe — confirms DNS + TLS + L7 reachability. Any HTTP
+    response (including 4xx/5xx) counts as success: it means DNS resolved,
+    TLS handshook, and the server returned a status line. Only network-path
+    failures (connection refused, DNS broken, TLS broken, timeout) count
+    as down."""
+    req = urllib.request.Request(
+        url, method="HEAD", headers={"User-Agent": "netmonitor/1.0"}
+    )
+    t0 = time.monotonic()
+    try:
+        with urllib.request.urlopen(req, timeout=WEB_TIMEOUT_SEC) as r:
+            _ = r.status
+        return 1, (time.monotonic() - t0) * 1000.0
+    except urllib.error.HTTPError:
+        return 1, (time.monotonic() - t0) * 1000.0
+    except Exception:
+        return 0, None
+
+
 def probe_all(topo: Topology, pool: ThreadPoolExecutor) -> list[tuple[str, str, int, float | None]]:
-    targets: list[tuple[str, str]] = []
+    targets: list[tuple[str, str, callable]] = []
     if topo.gateway_ip:
-        targets.append(("lan", topo.gateway_ip))
+        targets.append(("lan", topo.gateway_ip, ping_once))
     if topo.isp_edge_ip:
-        targets.append(("isp", topo.isp_edge_ip))
+        targets.append(("isp", topo.isp_edge_ip, ping_once))
     for t in WAN_TARGETS:
-        targets.append(("wan", t))
-    results = list(pool.map(lambda x: (x[0], x[1], *ping_once(x[1])), targets))
+        targets.append(("wan", t, ping_once))
+    for u in WEB_TARGETS:
+        targets.append(("web", u, web_probe_once))
+    results = list(pool.map(lambda x: (x[0], x[1], *x[2](x[1])), targets))
     return results
 
 
@@ -283,7 +311,7 @@ def main() -> int:
     fp = topo.fingerprint()
     print_topo(session_id, topo)
 
-    pool = ThreadPoolExecutor(max_workers=len(WAN_TARGETS) + 2)
+    pool = ThreadPoolExecutor(max_workers=len(WAN_TARGETS) + len(WEB_TARGETS) + 2)
     cycle = 0
     while True:
         start = time.time()
@@ -306,6 +334,14 @@ def main() -> int:
         cycle += 1
         if cycle % TOPO_CHECK_EVERY_CYCLES == 0:
             new_fp = cheap_fingerprint()
+            if new_fp != fp:
+                # Confirm with a second read. A single None from `route get
+                # default` or the SSID lookup (transient under load or during
+                # a brief Wi-Fi blip) used to spawn phantom sessions.
+                time.sleep(2)
+                confirm_fp = cheap_fingerprint()
+                if confirm_fp == fp:
+                    new_fp = fp  # false alarm, skip the change branch below
             if new_fp != fp:
                 prev_isp = topo.isp or "unknown"
                 prev_city = topo.city or "unknown"
