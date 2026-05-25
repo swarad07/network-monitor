@@ -208,17 +208,199 @@ def compute_layer_outages(series: list[tuple]) -> list[dict]:
     return events
 
 
-def attribute_outages(layer_outages: dict[str, list[dict]]) -> list[dict]:
+TARGET_FRIENDLY = {
+    "1.1.1.1": "Cloudflare (1.1.1.1)",
+    "8.8.8.8": "Google (8.8.8.8)",
+    "https://www.cloudflare.com/": "Cloudflare HTTPS",
+    "https://www.google.com/": "Google HTTPS",
+}
+
+
+def _target_label(t: str) -> str:
+    return TARGET_FRIENDLY.get(t, t)
+
+
+def per_target_in_window(since: int, until: int,
+                         session_ids: list[int]) -> dict[tuple, list[tuple]]:
+    """Return {(layer, target): [(ts, success), ...]} for the window. Used to
+    enrich outage attribution with per-target evidence."""
+    out: dict[tuple, list[tuple]] = {}
+    if not session_ids:
+        return out
+    placeholders = ",".join("?" * len(session_ids))
+    sql = f"""
+        SELECT ts, layer, target, success FROM probes
+        WHERE ts >= ? AND ts <= ? AND session_id IN ({placeholders})
+        ORDER BY ts
+    """
+    with conn() as c:
+        for r in c.execute(sql, (since, until, *session_ids)):
+            out.setdefault((r["layer"], r["target"]), []).append(
+                (r["ts"], r["success"]))
+    return out
+
+
+def _overlaps(a: dict, b: dict, slack: int = INTERVAL_SEC) -> bool:
+    return a["start"] - slack <= b["end"] and b["start"] - slack <= a["end"]
+
+
+def _concurrent_layers(o: dict, layer_outages: dict,
+                       exclude: str) -> list[str]:
+    return [l for l in LAYERS if l != exclude
+            and any(_overlaps(o, e) for e in layer_outages.get(l, []))]
+
+
+def _per_target_stats(layer: str, o: dict,
+                      target_series: dict[tuple, list[tuple]]) -> list[dict]:
+    stats = []
+    for (l, t), series in target_series.items():
+        if l != layer:
+            continue
+        slice_ = [s for ts, s in series if o["start"] <= ts <= o["end"]]
+        if not slice_:
+            continue
+        fail = sum(1 for s in slice_ if not s)
+        ok = len(slice_) - fail
+        stats.append({
+            "target": t, "label": _target_label(t),
+            "fail": fail, "ok": ok, "n": len(slice_),
+            "ratio": fail / len(slice_),
+        })
+    stats.sort(key=lambda s: s["target"])
+    return stats
+
+
+def _evidence_line(stats: list[dict], concurrent: list[str]) -> str:
+    parts = [f"{s['label']} {s['fail']}/{s['n']} fail" for s in stats]
+    if concurrent:
+        parts.append("concurrent: " + "+".join(sorted(concurrent)))
+    return " · ".join(parts)
+
+
+def explain_outage(layer: str, o: dict,
+                   target_series: dict[tuple, list[tuple]],
+                   layer_outages: dict) -> dict:
+    """Returns {verdict, summary, evidence} — a per-outage human explanation
+    grounded in the actual probes that failed and what other layers did at
+    the same time."""
+    stats = _per_target_stats(layer, o, target_series)
+    fully_failed = [s for s in stats if s["ratio"] >= 0.999]
+    fully_ok = [s for s in stats if s["ratio"] == 0]
+    partial = [s for s in stats if 0 < s["ratio"] < 0.999]
+    concurrent = _concurrent_layers(o, layer_outages, exclude=layer)
+    evidence = _evidence_line(stats, concurrent)
+    target_ip = stats[0]["target"] if stats else None
+
+    if layer == "lan":
+        return {
+            "verdict": "Router (LAN)",
+            "summary": (f"Router {target_ip} unreachable — local network is "
+                        "down. Check router power, cable, and Wi-Fi."),
+            "evidence": evidence,
+        }
+
+    if layer == "isp":
+        if "wan" in concurrent:
+            return {
+                "verdict": "ISP last-mile",
+                "summary": (f"Your gateway is up but the ISP edge "
+                            f"({target_ip}) and upstream are both unreachable. "
+                            "Call the ISP."),
+                "evidence": evidence,
+            }
+        return {
+            "verdict": "ISP edge blip",
+            "summary": (f"ISP edge {target_ip} unreachable while upstream "
+                        "still routable — transient route issue on the next hop."),
+            "evidence": evidence,
+        }
+
+    if layer == "wan":
+        if "isp" in concurrent and o["status"] == "down":
+            return {
+                "verdict": "ISP last-mile",
+                "summary": ("Full upstream outage — ISP edge also unreachable; "
+                            "root cause is ISP last-mile, not transit."),
+                "evidence": evidence,
+            }
+        if o["status"] == "down" and fully_failed and not fully_ok:
+            names = ", ".join(s["label"] for s in fully_failed)
+            return {
+                "verdict": "Transit / peering",
+                "summary": (f"{names} both unreachable while your ISP edge is "
+                            "up — peering or route failure beyond your ISP."),
+                "evidence": evidence,
+            }
+        if o["status"] == "degraded":
+            return {
+                "verdict": "Partial transit",
+                "summary": ("Some upstream targets failing while others "
+                            "respond — single-path or peering loss, not a full "
+                            "outage."),
+                "evidence": evidence,
+            }
+        return {
+            "verdict": "Upstream affected",
+            "summary": "Upstream connectivity impaired.",
+            "evidence": evidence,
+        }
+
+    if layer == "web":
+        if "wan" in concurrent:
+            return {
+                "verdict": "Upstream down",
+                "summary": ("HTTPS naturally failing because upstream transit "
+                            "was also unreachable at the same time."),
+                "evidence": evidence,
+            }
+        if fully_failed and fully_ok:
+            fnames = ", ".join(s["label"] for s in fully_failed)
+            onames = ", ".join(s["label"] for s in fully_ok)
+            return {
+                "verdict": "Destination-specific",
+                "summary": (f"{fnames} failing while {onames} OK — problem at "
+                            "that destination, not your network."),
+                "evidence": evidence,
+            }
+        if fully_failed and not fully_ok:
+            return {
+                "verdict": "DNS / TLS layer",
+                "summary": ("ICMP upstream is OK but HTTPS to multiple sites "
+                            "is failing — suspect DNS resolver, TLS, or captive "
+                            "portal interception."),
+                "evidence": evidence,
+            }
+        if partial:
+            return {
+                "verdict": "Partial HTTPS loss",
+                "summary": "Intermittent HTTPS failures across web targets.",
+                "evidence": evidence,
+            }
+        return {
+            "verdict": "Web layer issue",
+            "summary": "HTTPS reachability impaired.",
+            "evidence": evidence,
+        }
+
+    return {"verdict": "Connectivity", "summary": "Connectivity issue.",
+            "evidence": evidence}
+
+
+def attribute_outages(layer_outages: dict[str, list[dict]],
+                      since: int, until: int,
+                      session_ids: list[int]) -> list[dict]:
+    target_series = per_target_in_window(since, until, session_ids)
     flat = []
     for layer in LAYERS:
         for o in layer_outages.get(layer, []):
-            attribution = {
-                "lan": "LAN / router (your side)",
-                "isp": "ISP last-mile (ISP fault)",
-                "wan": "Upstream / peering (ISP transit)",
-                "web": "DNS / HTTPS reachability (DNS, TLS or upstream)",
-            }[layer]
-            flat.append({**o, "layer": layer, "attribution": attribution})
+            exp = explain_outage(layer, o, target_series, layer_outages)
+            flat.append({
+                **o, "layer": layer,
+                "verdict": exp["verdict"],
+                "summary": exp["summary"],
+                "evidence": exp["evidence"],
+                "attribution": exp["summary"],
+            })
     flat.sort(key=lambda x: x["start"])
     return flat
 
@@ -659,7 +841,8 @@ def api_status():
         selected_session_ids, since, until, bucket_sec,
     )
     sel_layer_outages = {l: compute_layer_outages(sel_per_layer.get(l, [])) for l in LAYERS}
-    selected_outages = attribute_outages(sel_layer_outages)
+    selected_outages = attribute_outages(sel_layer_outages, since, until,
+                                         selected_session_ids)
     selected_stats = compute_stats(sel_per_layer, sel_layer_outages)
 
     comparison = network_comparison(since, until)
@@ -1015,10 +1198,15 @@ INDEX_HTML = r"""
  tr:last-child td{border-bottom:none}
  tbody tr:hover{background:var(--surface-hover)}
  #outageTable thead th:hover{ color:var(--accent); background:var(--surface-hover) }
- .attr-lan{color:var(--warn)}
- .attr-isp{color:var(--bad); font-weight:700}
- .attr-wan{color:var(--info)}
- .attr-web{color:var(--sienna)}
+ .attr-cell{display:flex; flex-direction:column; gap:3px}
+ .attr-cell .verdict{font-weight:700; font-size:12px}
+ .attr-cell .summary{color:var(--text); font-size:12.5px; line-height:1.4}
+ .attr-cell .evidence{color:var(--text-faint); font-size:11px;
+                      font-variant-numeric:tabular-nums; line-height:1.35}
+ .attr-lan .verdict{color:var(--warn)}
+ .attr-isp .verdict{color:var(--bad)}
+ .attr-wan .verdict{color:var(--info)}
+ .attr-web .verdict{color:var(--sienna)}
 
  /* === Inline help (?) === */
  .help{
@@ -1200,6 +1388,11 @@ function fmtDur(s){
   return h+"h "+mm+"m";
 }
 function fmtTs(ts){ return new Date(ts*1000).toLocaleString(); }
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  }[c]));
+}
 function fmtTime(ts){ return new Date(ts*1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}); }
 
 function uptimeTone(pct){
@@ -1563,12 +1756,21 @@ function renderOutages(d){
     const tr = document.createElement("tr");
     const status = o.status || "down";
     const badge = `<span class="pill pill-${status}" style="margin-right:8px">${status.toUpperCase()}</span>`;
+    const verdict = o.verdict || "";
+    const summary = o.summary || o.attribution || "";
+    const evidence = o.evidence || "";
+    const cell =
+      `<div class="attr-cell">` +
+        `<div class="verdict">${badge}${escapeHtml(verdict)}</div>` +
+        `<div class="summary">${escapeHtml(summary)}</div>` +
+        (evidence ? `<div class="evidence">${escapeHtml(evidence)}</div>` : "") +
+      `</div>`;
     tr.innerHTML =
       `<td>${fmtTs(o.start)}</td>` +
       `<td>${fmtTs(o.end)}</td>` +
       `<td>${fmtDur(o.duration_sec)}</td>` +
       `<td>${LAYER_DISPLAY[o.layer]}</td>` +
-      `<td class="attr-${o.layer}">${badge}${o.attribution}</td>`;
+      `<td class="attr-${o.layer}">${cell}</td>`;
     tbody.appendChild(tr);
   });
 }
