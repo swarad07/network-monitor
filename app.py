@@ -21,11 +21,12 @@ from flask import Flask, jsonify, render_template_string, request
 DB_PATH = Path(__file__).parent / "netmonitor.db"
 INTERVAL_SEC = 5
 OUTAGE_MERGE_GAP_SEC = INTERVAL_SEC * 3
-LAYERS = ["lan", "isp", "wan"]
+LAYERS = ["lan", "isp", "wan", "web"]
 LAYER_TITLES = {
     "lan": "LAN (machine ↔ router)",
     "isp": "ISP edge (router ↔ ISP)",
     "wan": "WAN (ISP ↔ internet)",
+    "web": "Web (DNS + HTTPS)",
 }
 
 app = Flask(__name__)
@@ -168,27 +169,43 @@ def wan_rtt_bucketed_by_label(session_ids: list[int], since: int, until: int,
 
 
 def compute_layer_outages(series: list[tuple]) -> list[dict]:
-    outages, cur_s, cur_e = [], None, None
-    for ts, ok, _total, _rtt in series:
-        down = ok == 0
-        if down:
-            if cur_s is None:
-                cur_s = cur_e = ts
-            elif ts - cur_e <= OUTAGE_MERGE_GAP_SEC:
-                cur_e = ts
-            else:
-                outages.append({"start": cur_s, "end": cur_e,
-                                "duration_sec": cur_e - cur_s + INTERVAL_SEC})
-                cur_s = cur_e = ts
+    """Emit contiguous events with status 'down' (all targets failed) or
+    'degraded' (some but not all targets failed). State changes close the
+    current event and open a new one — so a brownout that flips between
+    partial and full loss surfaces as multiple events, not one merged blob."""
+    events: list[dict] = []
+    cur_s = cur_e = None
+    cur_status: str | None = None
+
+    def flush():
+        nonlocal cur_s, cur_e, cur_status
+        if cur_s is not None:
+            events.append({"start": cur_s, "end": cur_e,
+                           "duration_sec": cur_e - cur_s + INTERVAL_SEC,
+                           "status": cur_status})
+            cur_s = cur_e = cur_status = None
+
+    for ts, ok, total, _rtt in series:
+        if ok == 0:
+            status = "down"
+        elif total and ok < total:
+            status = "degraded"
         else:
-            if cur_s is not None:
-                outages.append({"start": cur_s, "end": cur_e,
-                                "duration_sec": cur_e - cur_s + INTERVAL_SEC})
-                cur_s = cur_e = None
-    if cur_s is not None:
-        outages.append({"start": cur_s, "end": cur_e,
-                        "duration_sec": cur_e - cur_s + INTERVAL_SEC})
-    return outages
+            status = None
+        if status is None:
+            flush()
+            continue
+        if cur_s is None:
+            cur_s = cur_e = ts
+            cur_status = status
+        elif status == cur_status and ts - cur_e <= OUTAGE_MERGE_GAP_SEC:
+            cur_e = ts
+        else:
+            flush()
+            cur_s = cur_e = ts
+            cur_status = status
+    flush()
+    return events
 
 
 def attribute_outages(layer_outages: dict[str, list[dict]]) -> list[dict]:
@@ -199,6 +216,7 @@ def attribute_outages(layer_outages: dict[str, list[dict]]) -> list[dict]:
                 "lan": "LAN / router (your side)",
                 "isp": "ISP last-mile (ISP fault)",
                 "wan": "Upstream / peering (ISP transit)",
+                "web": "DNS / HTTPS reachability (DNS, TLS or upstream)",
             }[layer]
             flat.append({**o, "layer": layer, "attribution": attribution})
     flat.sort(key=lambda x: x["start"])
@@ -207,16 +225,18 @@ def attribute_outages(layer_outages: dict[str, list[dict]]) -> list[dict]:
 
 def bucket_down_ratio(series: list[tuple], since: int, until: int,
                       bucket_sec: int) -> list[float | None]:
+    """Fraction of probes in each bucket that failed. Partial loss (e.g. one
+    of two WAN targets down) now contributes proportionally — the heatmap
+    previously only lit up when *every* target failed simultaneously."""
     n = max(1, (until - since) // bucket_sec)
-    total = [0] * n
-    down = [0] * n
-    for ts, ok, _t, _r in series:
+    probes = [0] * n
+    failed = [0] * n
+    for ts, ok, total, _r in series:
         i = (ts - since) // bucket_sec
-        if 0 <= i < n:
-            total[i] += 1
-            if ok == 0:
-                down[i] += 1
-    return [(down[i] / total[i]) if total[i] else None for i in range(n)]
+        if 0 <= i < n and total:
+            probes[i] += total
+            failed[i] += (total - ok)
+    return [(failed[i] / probes[i]) if probes[i] else None for i in range(n)]
 
 
 def bucket_times(since: int, until: int, bucket_sec: int) -> list[int]:
@@ -229,14 +249,20 @@ def compute_stats(per_layer: dict, layer_outages: dict) -> dict:
     for l in LAYERS:
         s = per_layer.get(l, [])
         if not s:
-            stats[l] = {"uptime_pct": None, "outages": 0, "longest_sec": 0, "samples": 0}
+            stats[l] = {"uptime_pct": None, "outages": 0, "degraded_events": 0,
+                        "degraded_pct": 0, "longest_sec": 0, "samples": 0}
             continue
         down_secs = sum(1 for _ts, ok, _t, _r in s if ok == 0)
+        degraded_secs = sum(1 for _ts, ok, t, _r in s if t and 0 < ok < t)
         outs = layer_outages.get(l, [])
+        down_events = [o for o in outs if o.get("status") == "down"]
+        degraded_events = [o for o in outs if o.get("status") == "degraded"]
         stats[l] = {
             "uptime_pct": round((1 - down_secs / len(s)) * 100, 3),
-            "outages": len(outs),
-            "longest_sec": max((o["duration_sec"] for o in outs), default=0),
+            "degraded_pct": round(degraded_secs / len(s) * 100, 3),
+            "outages": len(down_events),
+            "degraded_events": len(degraded_events),
+            "longest_sec": max((o["duration_sec"] for o in down_events), default=0),
             "samples": len(s),
         }
     return stats
@@ -253,7 +279,7 @@ def live_status_per_layer(current_session_ids: list[int]) -> dict:
         for l in LAYERS:
             r = c.execute(
                 f"""
-                SELECT ts, SUM(success) AS ok FROM probes
+                SELECT ts, SUM(success) AS ok, COUNT(*) AS total FROM probes
                 WHERE layer = ? AND session_id IN ({placeholders})
                 GROUP BY ts ORDER BY ts DESC LIMIT 1
                 """,
@@ -263,8 +289,12 @@ def live_status_per_layer(current_session_ids: list[int]) -> dict:
                 status[l] = "unknown"
             elif time.time() - r["ts"] > INTERVAL_SEC * 3:
                 status[l] = "stale"
+            elif r["ok"] == 0:
+                status[l] = "down"
+            elif r["total"] and r["ok"] < r["total"]:
+                status[l] = "degraded"
             else:
-                status[l] = "up" if r["ok"] > 0 else "down"
+                status[l] = "up"
     return status
 
 
@@ -311,18 +341,22 @@ def quality_per_layer(since: int, until: int, session_ids: list[int]) -> dict:
 
 
 def isp_attributed_downtime_sec(per_layer: dict) -> int:
-    """Seconds in window where LAN was up but ISP or WAN was down → ISP fault."""
+    """Seconds in window where LAN was up but ISP / WAN / WEB was down → ISP fault."""
     lan = {ts: ok for ts, ok, _, _ in per_layer.get("lan", [])}
     isp = {ts: ok for ts, ok, _, _ in per_layer.get("isp", [])}
     wan = {ts: ok for ts, ok, _, _ in per_layer.get("wan", [])}
-    all_ts = set(lan) | set(isp) | set(wan)
+    web = {ts: ok for ts, ok, _, _ in per_layer.get("web", [])}
+    all_ts = set(lan) | set(isp) | set(wan) | set(web)
     down_secs = 0
     for ts in all_ts:
         # If LAN didn't probe at this ts, assume LAN up (don't falsely blame ISP).
         lan_down = ts in lan and lan[ts] == 0
+        if lan_down:
+            continue
         isp_down = ts in isp and isp[ts] == 0
         wan_down = ts in wan and wan[ts] == 0
-        if not lan_down and (isp_down or wan_down):
+        web_down = ts in web and web[ts] == 0
+        if isp_down or wan_down or web_down:
             down_secs += INTERVAL_SEC
     return down_secs
 
@@ -368,7 +402,8 @@ def pattern_insights(since: int, until: int, session_ids: list[int]) -> dict:
         lan_down = layers.get("lan") == 0
         isp_down = layers.get("isp") == 0
         wan_down = layers.get("wan") == 0
-        if not lan_down and (isp_down or wan_down):
+        web_down = layers.get("web") == 0
+        if not lan_down and (isp_down or wan_down or web_down):
             dt = datetime.datetime.fromtimestamp(ts)
             grid[dt.weekday()][dt.hour] += INTERVAL_SEC
             total += INTERVAL_SEC
@@ -835,9 +870,10 @@ INDEX_HTML = r"""
    padding:18px 20px 16px;
    transition:border-color .2s, box-shadow .2s;
  }
- .layer-card.lc-up   {border-color:var(--ok);   box-shadow:0 0 0 1px var(--ok-soft) inset}
- .layer-card.lc-down {border-color:var(--bad);  box-shadow:0 0 0 1px var(--bad-soft) inset}
- .layer-card.lc-stale{border-color:var(--warn); box-shadow:0 0 0 1px var(--warn-soft) inset}
+ .layer-card.lc-up      {border-color:var(--ok);   box-shadow:0 0 0 1px var(--ok-soft) inset}
+ .layer-card.lc-down    {border-color:var(--bad);  box-shadow:0 0 0 1px var(--bad-soft) inset}
+ .layer-card.lc-degraded{border-color:var(--warn); box-shadow:0 0 0 1px var(--warn-soft) inset}
+ .layer-card.lc-stale   {border-color:var(--warn); box-shadow:0 0 0 1px var(--warn-soft) inset}
 
  .layer-card .head{display:flex; justify-content:space-between; align-items:center;
                    margin-bottom:14px; gap:10px}
@@ -850,6 +886,7 @@ INDEX_HTML = r"""
                background:currentColor; margin-right:6px}
  .pill-up{background:var(--ok-soft); color:var(--ok)}
  .pill-down{background:var(--bad-soft); color:var(--bad)}
+ .pill-degraded{background:var(--warn-soft); color:var(--warn)}
  .pill-stale{background:var(--warn-soft); color:var(--warn)}
  .pill-unknown{background:var(--sienna-100); color:var(--sienna)}
 
@@ -977,9 +1014,37 @@ INDEX_HTML = r"""
  }
  tr:last-child td{border-bottom:none}
  tbody tr:hover{background:var(--surface-hover)}
+ #outageTable thead th:hover{ color:var(--accent); background:var(--surface-hover) }
  .attr-lan{color:var(--warn)}
  .attr-isp{color:var(--bad); font-weight:700}
  .attr-wan{color:var(--info)}
+ .attr-web{color:var(--sienna)}
+
+ /* === Inline help (?) === */
+ .help{
+   display:inline-flex; align-items:center; justify-content:center;
+   width:15px; height:15px; margin-left:8px;
+   border:1px solid var(--border); border-radius:50%;
+   color:var(--text-faint); font-size:10px; font-weight:700;
+   cursor:help; position:relative; vertical-align:middle;
+   text-transform:none; letter-spacing:0;
+   user-select:none;
+ }
+ .help:hover{ color:var(--accent); border-color:var(--accent); }
+ .help::after{
+   content:attr(data-help);
+   position:absolute; bottom:calc(100% + 8px); left:50%;
+   transform:translateX(-50%);
+   background:var(--surface-raised); color:var(--text);
+   border:1px solid var(--border); border-radius:6px;
+   padding:9px 11px; font-size:12px; font-weight:400;
+   line-height:1.45; width:300px; white-space:normal;
+   text-transform:none; letter-spacing:0;
+   opacity:0; pointer-events:none; transition:opacity .15s;
+   box-shadow:0 6px 16px rgba(22,22,22,.10);
+   z-index:100;
+ }
+ .help:hover::after{ opacity:1; }
  .comparison-table td.num{font-variant-numeric:tabular-nums; text-align:right}
  .comparison-table tr.current-row{background:var(--tangerine-100)}
  .comparison-table tr.current-row td:first-child::before{
@@ -1022,7 +1087,7 @@ INDEX_HTML = r"""
 
   <!-- ISP service report (condensed, at top) -->
   <section class="zone evidence">
-    <h2>ISP service report — this network</h2>
+    <h2>ISP service report — this network<span class="help" data-help="Summarizes ISP-attributable downtime in the selected window. Counts seconds where your LAN was up but ISP edge, WAN, or Web layers were down — those are faults on the provider's side, not yours. MTBF = mean time between ISP-attributed failures. Uptime streak = time since the last such failure.">?</span></h2>
     <div class="desc">Outages where the ISP failed to deliver — your router was up but the ISP edge or internet was unreachable. Screenshot for support calls.</div>
 
     <div class="report-strip">
@@ -1046,7 +1111,7 @@ INDEX_HTML = r"""
 
   <!-- Current network live status -->
   <section class="zone current">
-    <h2>Current network — live</h2>
+    <h2>Current network — live<span class="help" data-help="Live status of each probe layer right now, with uptime and quality stats over the selected window. UP = all targets responding. DEGRADED = some targets failing (partial packet loss / brownout). DOWN = every target failing. STALE = no recent probe in the last 15s. Layers: LAN (your router) → ISP edge → WAN (Cloudflare/Google ICMP) → Web (DNS + HTTPS).">?</span></h2>
     <div class="desc" id="liveDesc">Live layer status, uptime over selected window.</div>
     <div class="layer-row" id="currentLayerRow"></div>
   </section>
@@ -1057,8 +1122,9 @@ INDEX_HTML = r"""
 
     <div class="controls">
       <label class="ctl">Window
-        <select id="hours" onchange="resetZoom()">
+        <select id="hours" onchange="onHoursChange()">
           <option value="1">Last 1 hour</option>
+          <option value="3">Last 3 hours</option>
           <option value="6">Last 6 hours</option>
           <option value="24" selected>Last 24 hours</option>
           <option value="72">Last 3 days</option>
@@ -1079,20 +1145,20 @@ INDEX_HTML = r"""
       </span>
     </div>
 
-    <h3>Outage timeline <span style="text-transform:none; letter-spacing:0; font-size:11px; color:var(--text-faint)">— green = healthy, amber = partial, red = down</span></h3>
+    <h3>Outage timeline <span style="text-transform:none; letter-spacing:0; font-size:11px; color:var(--text-faint)">— green = healthy, amber = partial, red = down</span><span class="help" data-help="Color = fraction of probes that failed in each time bucket, per layer. Green = clean, amber = some loss, red = heavy loss. Unlike a pure up/down view, this surfaces partial loss — e.g. one of two WAN targets failing — so brownouts no longer hide. Hover any cell to see the loss %.">?</span></h3>
     <div class="panel"><div id="heatmap"></div></div>
 
-    <h3>WAN latency <span style="text-transform:none; letter-spacing:0; font-size:11px; color:var(--text-faint)">— one line per network</span></h3>
+    <h3>WAN latency <span style="text-transform:none; letter-spacing:0; font-size:11px; color:var(--text-faint)">— one line per network</span><span class="help" data-help="Median round-trip time to WAN ICMP targets (Cloudflare, Google), bucketed and split by network. A rising trend or sudden jitter often precedes a brownout. Gaps in the line mean the layer was completely unreachable in that bucket.">?</span></h3>
     <div class="panel"><div id="rttChart"></div></div>
 
-    <h3>Outage log</h3>
+    <h3>Outage log<span class="help" data-help="Every event detected in the selected window. DOWN (red pill) = every target in that layer failed simultaneously — a hard outage. DEGRADED (amber pill) = some targets failed but at least one still worked — partial loss / brownout. Click any column header to sort; click again to reverse.">?</span></h3>
     <table id="outageTable">
       <thead><tr><th>Start</th><th>End</th><th>Duration</th><th>Layer</th><th>Likely cause</th></tr></thead>
       <tbody></tbody>
     </table>
 
     <div id="comparisonBlock" style="display:none">
-      <h3 style="margin-top:22px">Network comparison</h3>
+      <h3 style="margin-top:22px">Network comparison<span class="help" data-help="Side-by-side stats for every network you've used in the selected window — useful for ranking ISPs or locations by reliability. ISP uptime % counts only ISP-attributable downtime (LAN-up but upstream-down), so router issues don't penalize the ISP.">?</span></h3>
       <table class="comparison-table">
         <thead>
           <tr>
@@ -1110,8 +1176,8 @@ INDEX_HTML = r"""
 </div>
 
 <script>
-const LAYERS_TOP_DOWN = ["wan","isp","lan"];
-const LAYER_DISPLAY = {lan:"LAN", isp:"ISP edge", wan:"WAN"};
+const LAYERS_TOP_DOWN = ["web","wan","isp","lan"];
+const LAYER_DISPLAY = {lan:"LAN", isp:"ISP edge", wan:"WAN", web:"Web"};
 
 // Light-theme palette for chart text and gridlines.
 const CHART_FONT = "#18181B";
@@ -1267,9 +1333,9 @@ function renderSessionInfo(d){
 function renderCurrentLayerRow(d){
   const container = document.getElementById("currentLayerRow");
   container.innerHTML = "";
-  const sparkColor = {lan:"#16A34A", isp:"#D97706", wan:"#2563EB"};
+  const sparkColor = {lan:"#16A34A", isp:"#D97706", wan:"#2563EB", web:"#9333EA"};
 
-  ["lan","isp","wan"].forEach(layer => {
+  ["lan","isp","wan","web"].forEach(layer => {
     const st = d.current_stats_per_layer[layer] || {};
     const status = d.current_status_per_layer[layer] || "unknown";
     const q = (d.current_quality_per_layer || {})[layer] || {};
@@ -1394,7 +1460,7 @@ function renderHeatmap(d){
     type:"heatmap", x: xs, y: LAYERS_TOP_DOWN.map(l => LAYER_DISPLAY[l]), z,
     zmin:0, zmax:1, showscale:false,
     colorscale: [[0,"#16A34A"], [0.5,"#FBBF24"], [1,"#DC2626"]],
-    hovertemplate: "%{y}<br>%{x}<br>down: %{z:.0%}<extra></extra>",
+    hovertemplate: "%{y}<br>%{x}<br>loss: %{z:.0%}<extra></extra>",
     xgap:0, ygap:2,
   };
   Plotly.react(el,[trace],{
@@ -1435,22 +1501,74 @@ function renderRtt(d){
   .catch(err => console.error("rtt render", err));
 }
 
+const OUTAGE_SORT_KEYS = ["start", "end", "duration_sec", "layer", "attribution"];
+let outageSort = { key: "start", dir: "desc" };
+
+function outageSortValue(o, key){
+  if (key === "layer") {
+    const i = LAYERS_TOP_DOWN.indexOf(o.layer);
+    return i === -1 ? 999 : i;
+  }
+  if (key === "attribution") {
+    // Group by status first (down before degraded), then layer, then start ts.
+    const statusRank = (o.status === "down") ? 0 : 1;
+    return `${statusRank}|${o.layer}|${o.start}`;
+  }
+  return o[key];
+}
+
 function renderOutages(d){
-  const tbody = document.querySelector("#outageTable tbody");
+  const table = document.getElementById("outageTable");
+  const tbody = table.querySelector("tbody");
+  const ths = table.querySelectorAll("thead th");
+
+  // Wire header click + arrow indicators. Idempotent across re-renders.
+  ths.forEach((th, i) => {
+    const key = OUTAGE_SORT_KEYS[i];
+    if (!key) return;
+    const baseLabel = th.dataset.baseLabel || th.textContent;
+    th.dataset.baseLabel = baseLabel;
+    const arrow = key === outageSort.key ? (outageSort.dir === "asc" ? " ▲" : " ▼") : "";
+    th.textContent = baseLabel + arrow;
+    th.style.cursor = "pointer";
+    th.style.userSelect = "none";
+    th.onclick = () => {
+      if (outageSort.key === key) {
+        outageSort.dir = outageSort.dir === "asc" ? "desc" : "asc";
+      } else {
+        outageSort.key = key;
+        // Sensible defaults: time/duration desc (recent/longest first),
+        // categorical asc (top-of-stack first).
+        outageSort.dir = (key === "start" || key === "end" || key === "duration_sec") ? "desc" : "asc";
+      }
+      renderOutages(d);
+    };
+  });
+
   tbody.innerHTML = "";
   const outages = d.outages || [];
   if (!outages.length){
     tbody.innerHTML = "<tr><td colspan=5 style='color:var(--text-faint)'>No outages in this window for the selected networks</td></tr>";
     return;
   }
-  outages.slice().reverse().forEach(o => {
+  const sorted = outages.slice().sort((a, b) => {
+    const av = outageSortValue(a, outageSort.key);
+    const bv = outageSortValue(b, outageSort.key);
+    let cmp;
+    if (typeof av === "string" || typeof bv === "string") cmp = String(av).localeCompare(String(bv));
+    else cmp = (av ?? 0) - (bv ?? 0);
+    return outageSort.dir === "asc" ? cmp : -cmp;
+  });
+  sorted.forEach(o => {
     const tr = document.createElement("tr");
+    const status = o.status || "down";
+    const badge = `<span class="pill pill-${status}" style="margin-right:8px">${status.toUpperCase()}</span>`;
     tr.innerHTML =
       `<td>${fmtTs(o.start)}</td>` +
       `<td>${fmtTs(o.end)}</td>` +
       `<td>${fmtDur(o.duration_sec)}</td>` +
       `<td>${LAYER_DISPLAY[o.layer]}</td>` +
-      `<td class="attr-${o.layer}">${o.attribution}</td>`;
+      `<td class="attr-${o.layer}">${badge}${o.attribution}</td>`;
     tbody.appendChild(tr);
   });
 }
@@ -1586,13 +1704,35 @@ async function load(){
   safeRun("comparison", () => renderComparison(d));
   safeRun("health",     () => renderHealth(d));
 
-  document.getElementById("lastUpdate").textContent = "updated " + new Date().toLocaleTimeString();
+  {
+    const now = new Date();
+    const time = now.toLocaleTimeString();
+    // Short TZ name (e.g. "IST", "PST") from the browser's locale-aware formatter.
+    const tz = new Intl.DateTimeFormat([], { timeZoneName: "short" })
+      .formatToParts(now).find(p => p.type === "timeZoneName")?.value || "";
+    document.getElementById("lastUpdate").textContent = `Updated at ${time} ${tz}`.trim();
+  }
 }
 
 document.addEventListener("click", ev => {
   const dp = document.getElementById("netpicker");
   if (dp.open && !dp.contains(ev.target)) dp.open = false;
 });
+
+// Restore last-used window from localStorage (default = 24h via HTML `selected`).
+(function restoreHours(){
+  try {
+    const saved = localStorage.getItem("nm.hours");
+    if (!saved) return;
+    const sel = document.getElementById("hours");
+    if ([...sel.options].some(o => o.value === saved)) sel.value = saved;
+  } catch (e) {}
+})();
+
+function onHoursChange(){
+  try { localStorage.setItem("nm.hours", document.getElementById("hours").value); } catch (e) {}
+  resetZoom();
+}
 
 load();
 setInterval(load, 10000);
