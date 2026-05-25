@@ -749,7 +749,7 @@ INDEX_HTML = r"""
    font-family:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",sans-serif;
    font-size:14px; line-height:1.5; -webkit-font-smoothing:antialiased;
  }
- .page{padding:0 32px 32px}
+ .page{padding:16px 32px 32px}
 
  h1{margin:0; font-size:24px; font-weight:700; letter-spacing:-.3px}
  h2{margin:0 0 14px; font-size:12px; text-transform:uppercase;
@@ -885,8 +885,8 @@ INDEX_HTML = r"""
  .pill::before{content:""; width:6px; height:6px; border-radius:50%;
                background:currentColor; margin-right:6px}
  .pill-up{background:var(--ok-soft); color:var(--ok)}
- .pill-down{background:var(--bad-soft); color:var(--bad)}
- .pill-degraded{background:var(--warn-soft); color:var(--warn)}
+ .pill-down{background:var(--bad); color:#fff}
+ .pill-degraded{background:var(--warn); color:#fff}
  .pill-stale{background:var(--warn-soft); color:var(--warn)}
  .pill-unknown{background:var(--sienna-100); color:var(--sienna)}
 
