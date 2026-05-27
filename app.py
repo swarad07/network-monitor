@@ -887,14 +887,30 @@ INDEX_HTML = r"""
 <html><head>
 <meta charset="utf-8">
 <title>NetMonitor — ISP outage tracker</title>
+<script>
+// Apply theme before paint to prevent flash. Default = light unless the user
+// explicitly opted into dark.
+(function(){
+  try {
+    var t = localStorage.getItem("nm.theme");
+    if (t === "dark") document.documentElement.setAttribute("data-theme","dark");
+  } catch (e) {}
+})();
+</script>
 <script src="/static/plotly.min.js"></script>
 <style>
  :root{
    /* Surfaces — cool, neutral, single elevation */
-   --bg:#FAFAF9;
+   --bg:#F7F6FB;
    --surface:#FFFFFF;
    --surface-raised:#FFFFFF;
-   --surface-hover:#F4F4F5;
+   --surface-hover:#F1EEF9;
+   /* Soft pastel indigo/violet/blue washes for the page background. */
+   --bg-gradient:
+     radial-gradient(ellipse 1100px 600px at 8% -10%,  rgba(99,102,241,0.10),  transparent 60%),
+     radial-gradient(ellipse 900px 600px  at 96% 4%,   rgba(167,139,250,0.09), transparent 60%),
+     radial-gradient(ellipse 1100px 700px at 50% 50%,  rgba(124,58,237,0.04),  transparent 70%),
+     radial-gradient(ellipse 1200px 800px at 40% 115%, rgba(59,130,246,0.07),  transparent 60%);
 
    /* Borders — light gray scale */
    --border:#E5E5E5;
@@ -909,11 +925,17 @@ INDEX_HTML = r"""
    --accent:#2563EB;
    --accent-700:#1D4ED8;
    --accent-soft:#DBEAFE;
+   --accent-ring:#93C5FD;
 
    /* Semantic — restrained, used only on actual status data */
    --ok:#16A34A;       --ok-soft:#DCFCE7;
    --warn:#D97706;     --warn-soft:#FFEDD5;
-   --bad:#DC2626;      --bad-soft:#FEE2E2;
+   --bad:#DC2626;      --bad-soft:#FEE2E2; --bad-ring:#FCA5A5;
+   --up-good:#4FA169;
+
+   /* Chart colors (read by Plotly via getComputedStyle) */
+   --chart-font:#18181B;
+   --chart-grid:#E5E5E5;
 
    /* Legacy aliases (kept so existing class names keep working) */
    --paper:var(--bg); --cream:var(--surface); --card:var(--surface);
@@ -926,11 +948,383 @@ INDEX_HTML = r"""
    --tuscan:var(--accent); --tuscan-100:var(--accent-soft);
    --midnight:var(--accent);
  }
+
+ /* === Dark mode — blue-violet gradients with subtle tints === */
+ [data-theme="dark"]{
+   /* Deep navy-violet base + two radial glows for ambient gradient feel */
+   --bg:#0B0B1A;
+   --bg-gradient:
+     radial-gradient(ellipse 1100px 600px at 12% -8%,  rgba(99,102,241,0.16), transparent 60%),
+     radial-gradient(ellipse 900px 600px  at 92% 8%,   rgba(167,139,250,0.13), transparent 60%),
+     radial-gradient(ellipse 1200px 700px at 50% 110%, rgba(124,58,237,0.10), transparent 60%);
+   --surface:#13132A;
+   --surface-raised:#1A1A36;
+   --surface-hover:#22224A;
+
+   --border:#2C2C4D;
+   --border-strong:#3F3F66;
+
+   --text:#E8E8F2;
+   --text-muted:#A8A8C2;
+   --text-faint:#7676A0;
+
+   /* Violet accent — vivid against the navy base */
+   --accent:#A78BFA;
+   --accent-700:#8B6FF5;
+   --accent-soft:rgba(139,92,246,0.18);
+   --accent-ring:rgba(167,139,250,0.45);
+
+   --ok:#34D399;     --ok-soft:rgba(52,211,153,0.16);
+   --warn:#FBBF24;   --warn-soft:rgba(251,191,36,0.16);
+   --bad:#F87171;    --bad-soft:rgba(248,113,113,0.16); --bad-ring:rgba(248,113,113,0.45);
+   --up-good:#6EE7B7;
+
+   --chart-font:#D6D6E8;
+   --chart-grid:#2A2A48;
+
+   --sienna-100:rgba(255,255,255,0.06);
+ }
  *{box-sizing:border-box}
- html,body{margin:0; padding:0; background:var(--bg); color:var(--text)}
+ html,body{margin:0; padding:0; color:var(--text)}
+ html{background:var(--bg)}
  body{
    font-family:-apple-system,BlinkMacSystemFont,"Inter","Segoe UI",sans-serif;
    font-size:14px; line-height:1.5; -webkit-font-smoothing:antialiased;
+   /* Ambient blue-violet gradient layered over the base color (dark only).
+      In light mode --bg-gradient is `none`, so only --bg shows through. */
+   background-color:var(--bg);
+   background-image:var(--bg-gradient);
+   background-attachment:fixed;
+   min-height:100vh;
+ }
+ /* === Light mode visual layer — soft pastel blue/violet gradients ===
+    Selectors are prefixed with `html` to outrank the base rules further
+    down in the stylesheet. The `[data-theme="dark"]` block below has the
+    same/higher specificity and applies later, so dark wins for dark mode. */
+
+ /* Section cards — pale diagonal indigo→violet→pink wash. */
+ html section.zone{
+   background:
+     linear-gradient(135deg, rgba(99,102,241,0.045) 0%, rgba(167,139,250,0.030) 50%, rgba(236,72,153,0.020) 100%),
+     linear-gradient(180deg, rgba(255,255,255,0.7), rgba(255,255,255,0.0) 70%),
+     var(--surface);
+   border-color:rgba(99,102,241,0.14);
+   box-shadow:
+     0 1px 0 rgba(255,255,255,0.9) inset,
+     0 1px 2px rgba(99,102,241,0.04),
+     0 8px 24px rgba(99,102,241,0.05);
+ }
+
+ /* Sticky network bar — pale violet frosted strip. */
+ html .sticky-details{
+   background:
+     linear-gradient(180deg, rgba(99,102,241,0.08), rgba(167,139,250,0.03)),
+     rgba(255,255,255,0.78);
+   border-top-color:rgba(99,102,241,0.12);
+   border-bottom:1px solid transparent;
+   box-shadow:0 1px 0 rgba(167,139,250,0.20);
+ }
+
+ /* Layer cards — soft violet base sheen; status-colored wash matches state. */
+ html .layer-card{
+   background:
+     linear-gradient(160deg, rgba(167,139,250,0.06) 0%, rgba(99,102,241,0.03) 60%, transparent 100%),
+     var(--surface-raised);
+   box-shadow:0 1px 0 rgba(255,255,255,0.8) inset, 0 4px 14px rgba(99,102,241,0.06);
+ }
+ html .layer-card.lc-up{
+   background:
+     linear-gradient(160deg, rgba(22,163,74,0.10) 0%, rgba(22,163,74,0.02) 60%, transparent 100%),
+     var(--surface-raised);
+ }
+ html .layer-card.lc-down{
+   background:
+     linear-gradient(160deg, rgba(220,38,38,0.12) 0%, rgba(220,38,38,0.03) 60%, transparent 100%),
+     var(--surface-raised);
+ }
+ html .layer-card.lc-degraded,
+ html .layer-card.lc-stale{
+   background:
+     linear-gradient(160deg, rgba(217,119,6,0.12) 0%, rgba(217,119,6,0.03) 60%, transparent 100%),
+     var(--surface-raised);
+ }
+
+ /* Stat tiles inside the ISP report — pale violet sheen. */
+ html .report-stats .rs{
+   background:
+     linear-gradient(155deg, rgba(167,139,250,0.07), rgba(99,102,241,0.02) 65%, transparent),
+     var(--surface-raised);
+ }
+
+ /* Hero "ISP downtime" card — red→pink pastel wash. */
+ html .report-hero{
+   background:
+     linear-gradient(140deg, rgba(248,113,113,0.16) 0%, rgba(236,72,153,0.10) 55%, rgba(167,139,250,0.05) 100%),
+     var(--surface-raised);
+   border-color:rgba(220,38,38,0.30);
+ }
+
+ /* "Pattern" insight card — pastel indigo→violet wash. */
+ html .report-insight{
+   background:
+     linear-gradient(140deg, rgba(99,102,241,0.14) 0%, rgba(167,139,250,0.09) 60%, rgba(236,72,153,0.04) 100%),
+     var(--surface-raised);
+   border-color:rgba(99,102,241,0.28);
+ }
+
+ /* Tables — pale gradient header strip. */
+ html table{
+   background:
+     linear-gradient(180deg, rgba(167,139,250,0.04), transparent 30%),
+     var(--surface-raised);
+   border-color:rgba(99,102,241,0.14);
+ }
+ html th{
+   background:linear-gradient(180deg, rgba(99,102,241,0.10), rgba(167,139,250,0.04));
+ }
+ html tbody tr:hover{background:rgba(167,139,250,0.06)}
+
+ /* Status pills — gradient fills. */
+ html .pill-up{
+   background:linear-gradient(135deg, rgba(22,163,74,0.18), rgba(22,163,74,0.08));
+ }
+ html .pill-down{
+   background:linear-gradient(135deg, #DC2626, #EC4899);
+   color:#fff;
+ }
+ html .pill-degraded{
+   background:linear-gradient(135deg, #D97706, #F59E0B);
+   color:#fff;
+ }
+ html .pill-stale{
+   background:linear-gradient(135deg, rgba(217,119,6,0.18), rgba(217,119,6,0.08));
+ }
+
+ /* H1 — gradient text matching the violet/indigo/blue family. */
+ html h1{
+   background:linear-gradient(135deg, #7C3AED 0%, #6366F1 45%, #2563EB 100%);
+   -webkit-background-clip:text; background-clip:text;
+   color:transparent;
+ }
+
+ /* Section heading dot — gradient instead of flat. */
+ html section.zone h2::before{
+   background:linear-gradient(135deg, #6366F1, #8B5CF6) !important;
+   box-shadow:0 0 6px rgba(99,102,241,0.30);
+ }
+ html section.zone.evidence h2::before{
+   background:linear-gradient(135deg, #DC2626, #EC4899) !important;
+   box-shadow:0 0 6px rgba(220,38,38,0.30);
+ }
+
+ /* Chart panel containers — pale violet wash. */
+ html .panel{
+   background:
+     linear-gradient(180deg, rgba(99,102,241,0.04), rgba(167,139,250,0.01)),
+     var(--surface-raised);
+   border-color:rgba(99,102,241,0.14);
+ }
+
+ /* Controls strip + dropdown menu — soft gradient surfaces. */
+ html select,
+ html details.netpicker summary{
+   background:linear-gradient(135deg, rgba(167,139,250,0.06), rgba(99,102,241,0.02));
+ }
+ html details.netpicker .menu{
+   background:
+     linear-gradient(180deg, rgba(99,102,241,0.06), rgba(167,139,250,0.02)),
+     var(--surface-raised);
+   box-shadow:0 16px 30px rgba(99,102,241,0.18), 0 0 0 1px rgba(99,102,241,0.10);
+ }
+ html details.netpicker .menu .row:hover{
+   background:linear-gradient(135deg, rgba(167,139,250,0.14), rgba(99,102,241,0.06));
+ }
+
+ /* Help tooltip & loader pill */
+ html #help-tooltip{
+   background:
+     linear-gradient(155deg, rgba(99,102,241,0.10), rgba(167,139,250,0.05)),
+     var(--surface-raised);
+   box-shadow:0 16px 30px rgba(99,102,241,0.18), 0 0 0 1px rgba(99,102,241,0.12);
+ }
+ html #loadingIndicator{
+   background:linear-gradient(135deg, rgba(167,139,250,0.12), rgba(99,102,241,0.04));
+   border-color:rgba(99,102,241,0.28);
+ }
+
+ /* Sub-stats inside layer cards — gradient divider line. */
+ html .substats{
+   border-top:1px solid transparent;
+   border-image:linear-gradient(90deg, transparent, rgba(99,102,241,0.30), transparent) 1;
+ }
+
+ /* === Dark mode visual layer — richer gradients & tints === */
+
+ [data-theme="dark"]{
+   /* More saturated ambient glow for the page background. */
+   --bg-gradient:
+     radial-gradient(ellipse 1200px 700px at 8% -10%,  rgba(99,102,241,0.28), transparent 55%),
+     radial-gradient(ellipse 1000px 700px at 96% 4%,   rgba(167,139,250,0.22), transparent 55%),
+     radial-gradient(ellipse 1100px 800px at 50% 50%,  rgba(124,58,237,0.10),  transparent 65%),
+     radial-gradient(ellipse 1300px 800px at 40% 115%, rgba(59,130,246,0.16),  transparent 60%);
+ }
+
+ /* Section cards — diagonal blue→violet sheen + ring highlight on top edge. */
+ [data-theme="dark"] section.zone{
+   background:
+     linear-gradient(135deg, rgba(99,102,241,0.10) 0%, rgba(167,139,250,0.06) 45%, rgba(236,72,153,0.04) 100%),
+     linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0.0) 60%),
+     var(--surface);
+   border-color:rgba(167,139,250,0.16);
+   box-shadow:
+     0 1px 0 rgba(255,255,255,0.06) inset,
+     0 0 0 1px rgba(99,102,241,0.06) inset,
+     0 12px 32px rgba(0,0,0,0.32),
+     0 2px 6px rgba(0,0,0,0.20);
+ }
+
+ /* Sticky header — frosted indigo strip with a violet bottom edge. */
+ [data-theme="dark"] .sticky-details{
+   background:
+     linear-gradient(180deg, rgba(99,102,241,0.10), rgba(167,139,250,0.04)),
+     rgba(11,11,26,0.78);
+   border-top-color:rgba(167,139,250,0.16);
+   border-bottom:1px solid transparent;
+   box-shadow:0 1px 0 rgba(167,139,250,0.22);
+ }
+
+ /* Layer cards — base violet sheen, plus colored wash matching the layer status. */
+ [data-theme="dark"] .layer-card{
+   background:
+     linear-gradient(160deg, rgba(167,139,250,0.10) 0%, rgba(99,102,241,0.05) 50%, transparent 100%),
+     var(--surface-raised);
+   box-shadow:0 1px 0 rgba(255,255,255,0.04) inset, 0 8px 22px rgba(0,0,0,0.30);
+ }
+ [data-theme="dark"] .layer-card.lc-up{
+   background:
+     linear-gradient(160deg, rgba(52,211,153,0.18) 0%, rgba(52,211,153,0.05) 55%, transparent 100%),
+     var(--surface-raised);
+ }
+ [data-theme="dark"] .layer-card.lc-down{
+   background:
+     linear-gradient(160deg, rgba(248,113,113,0.22) 0%, rgba(248,113,113,0.06) 55%, transparent 100%),
+     var(--surface-raised);
+ }
+ [data-theme="dark"] .layer-card.lc-degraded,
+ [data-theme="dark"] .layer-card.lc-stale{
+   background:
+     linear-gradient(160deg, rgba(251,191,36,0.20) 0%, rgba(251,191,36,0.05) 55%, transparent 100%),
+     var(--surface-raised);
+ }
+
+ /* Big numbers boxes inside the ISP report — soft violet sheen. */
+ [data-theme="dark"] .report-stats .rs{
+   background:
+     linear-gradient(155deg, rgba(167,139,250,0.12), rgba(99,102,241,0.05) 60%, transparent),
+     var(--surface-raised);
+ }
+
+ /* Hero "ISP downtime" card — red→magenta wash. */
+ [data-theme="dark"] .report-hero{
+   background:
+     linear-gradient(140deg, rgba(248,113,113,0.32) 0%, rgba(236,72,153,0.18) 55%, rgba(167,139,250,0.10) 100%),
+     var(--surface-raised);
+   border-color:rgba(248,113,113,0.40);
+ }
+
+ /* "Pattern" insight card — indigo→violet wash. */
+ [data-theme="dark"] .report-insight{
+   background:
+     linear-gradient(140deg, rgba(99,102,241,0.28) 0%, rgba(167,139,250,0.18) 60%, rgba(236,72,153,0.10) 100%),
+     var(--surface-raised);
+   border-color:rgba(167,139,250,0.40);
+ }
+
+ /* Tables — gradient header strip. */
+ [data-theme="dark"] table{
+   background:
+     linear-gradient(180deg, rgba(167,139,250,0.05), transparent 30%),
+     var(--surface-raised);
+   border-color:rgba(167,139,250,0.16);
+ }
+ [data-theme="dark"] th{
+   background:linear-gradient(180deg, rgba(99,102,241,0.20), rgba(167,139,250,0.08));
+   color:#D6D6F2;
+ }
+ [data-theme="dark"] tbody tr:hover{background:rgba(167,139,250,0.08)}
+
+ /* Status pills — gradient fills. */
+ [data-theme="dark"] .pill-up{
+   background:linear-gradient(135deg, rgba(52,211,153,0.25), rgba(52,211,153,0.10));
+   color:#6EE7B7;
+ }
+ [data-theme="dark"] .pill-down{
+   background:linear-gradient(135deg, #F87171, #EC4899);
+   color:#0B0B1A;
+ }
+ [data-theme="dark"] .pill-degraded{
+   background:linear-gradient(135deg, #FBBF24, #F59E0B);
+   color:#0B0B1A;
+ }
+ [data-theme="dark"] .pill-stale{
+   background:linear-gradient(135deg, rgba(251,191,36,0.22), rgba(251,191,36,0.08));
+   color:#FCD34D;
+ }
+
+ /* H1 — gradient text. */
+ [data-theme="dark"] h1{
+   background:linear-gradient(135deg, #C4B5FD 0%, #818CF8 40%, #60A5FA 100%);
+   -webkit-background-clip:text; background-clip:text;
+   color:transparent;
+ }
+
+ /* Section heading dot — gradient instead of flat. */
+ [data-theme="dark"] section.zone h2::before{
+   background:linear-gradient(135deg, var(--accent), #6366F1) !important;
+   box-shadow:0 0 8px rgba(167,139,250,0.55);
+ }
+ [data-theme="dark"] section.zone.evidence h2::before{
+   background:linear-gradient(135deg, #F87171, #EC4899) !important;
+   box-shadow:0 0 8px rgba(248,113,113,0.45);
+ }
+
+ /* Chart panel containers — subtle violet wash so plotly tiles don't sit on flat surface. */
+ [data-theme="dark"] .panel{
+   background:
+     linear-gradient(180deg, rgba(99,102,241,0.10), rgba(167,139,250,0.02)),
+     var(--surface-raised);
+   border-color:rgba(167,139,250,0.18);
+ }
+
+ /* Controls strip + dropdown menu — soft gradient surfaces. */
+ [data-theme="dark"] select,
+ [data-theme="dark"] details.netpicker summary{
+   background:linear-gradient(135deg, rgba(167,139,250,0.10), rgba(99,102,241,0.04));
+ }
+ [data-theme="dark"] details.netpicker .menu{
+   background:linear-gradient(180deg, rgba(99,102,241,0.10), rgba(167,139,250,0.04)),
+              var(--surface-raised);
+   box-shadow:0 16px 40px rgba(0,0,0,0.60), 0 0 0 1px rgba(167,139,250,0.18);
+ }
+ [data-theme="dark"] details.netpicker .menu .row:hover{
+   background:linear-gradient(135deg, rgba(167,139,250,0.18), rgba(99,102,241,0.08));
+ }
+
+ /* Help tooltip & loader pill */
+ [data-theme="dark"] #help-tooltip{
+   background:linear-gradient(155deg, rgba(99,102,241,0.20), rgba(167,139,250,0.10)),
+              var(--surface-raised);
+   box-shadow:0 16px 40px rgba(0,0,0,0.60), 0 0 0 1px rgba(167,139,250,0.20);
+ }
+ [data-theme="dark"] #loadingIndicator{
+   background:linear-gradient(135deg, rgba(167,139,250,0.18), rgba(99,102,241,0.06));
+   border-color:rgba(167,139,250,0.35);
+ }
+
+ /* Sub-stats inside layer cards — gradient divider line. */
+ [data-theme="dark"] .substats{
+   border-top:1px solid transparent;
+   border-image:linear-gradient(90deg, transparent, rgba(167,139,250,0.40), transparent) 1;
  }
  .page{padding:16px 32px 32px}
 
@@ -947,6 +1341,21 @@ INDEX_HTML = r"""
  }
  .topbar .sub{color:var(--text-faint); font-size:14px}
  #lastUpdate{color:var(--text-faint); font-size:12px; white-space:nowrap}
+
+ .topbar .right{display:flex; align-items:center; gap:14px}
+ .theme-toggle{
+   appearance:none;
+   background:linear-gradient(135deg, rgba(167,139,250,0.10), rgba(99,102,241,0.04));
+   color:var(--text);
+   border:1px solid var(--border); border-radius:999px;
+   padding:5px 10px; font-size:13px; cursor:pointer; line-height:1;
+   display:inline-flex; align-items:center; gap:6px;
+   transition:border-color .15s, color .15s, background .15s;
+ }
+ .theme-toggle:hover{border-color:var(--accent); color:var(--accent)}
+ [data-theme="dark"] .theme-toggle{
+   background:linear-gradient(135deg, rgba(167,139,250,0.10), rgba(99,102,241,0.06));
+ }
 
  /* Loading indicator — only visible while a user-triggered filter change
     (window or networks) is fetching+rendering. The 10s auto-refresh does
@@ -1016,7 +1425,7 @@ INDEX_HTML = r"""
  }
  .report-hero{
    background:var(--bad-soft);
-   border:1px solid #FCA5A5;
+   border:1px solid var(--bad-ring);
    border-radius:10px;
    padding:14px 18px;
    display:flex; flex-direction:column; justify-content:center;
@@ -1046,7 +1455,7 @@ INDEX_HTML = r"""
  }
  .report-insight{
    background:var(--accent-soft);
-   border:1px solid #93C5FD;
+   border:1px solid var(--accent-ring);
    border-radius:10px;
    padding:12px 14px;
    display:flex; flex-direction:column; justify-content:center;
@@ -1098,7 +1507,7 @@ INDEX_HTML = r"""
    font-variant-numeric:tabular-nums;
  }
  .uptime-num.up-excellent{color:var(--ok)}
- .uptime-num.up-good     {color:#4FA169}
+ .uptime-num.up-good     {color:var(--up-good)}
  .uptime-num.up-warn     {color:var(--warn)}
  .uptime-num.up-bad      {color:var(--bad)}
  .uptime-num.up-unknown  {color:var(--text-faint)}
@@ -1282,7 +1691,13 @@ INDEX_HTML = r"""
     <h1>NetMonitor <span style="font-size:14px; color:var(--text-faint); font-weight:400">— ISP outage tracker</span></h1>
     <div class="sub" id="topSub">…</div>
   </div>
-  <div id="lastUpdate"></div>
+  <div class="right">
+    <button id="themeToggle" class="theme-toggle" type="button"
+            onclick="toggleTheme()" aria-label="Toggle dark mode">
+      <span id="themeToggleIcon">🌙</span><span id="themeToggleLabel">Dark</span>
+    </button>
+    <div id="lastUpdate"></div>
+  </div>
 </div>
 
 <!-- Sticky connection details -->
@@ -1387,9 +1802,14 @@ INDEX_HTML = r"""
 const LAYERS_TOP_DOWN = ["web","wan","isp","lan"];
 const LAYER_DISPLAY = {lan:"LAN", isp:"ISP edge", wan:"WAN", web:"Web"};
 
-// Light-theme palette for chart text and gridlines.
-const CHART_FONT = "#18181B";
-const CHART_GRID = "#E5E5E5";
+// Chart text/grid colors are pulled from CSS vars at render time so they
+// follow the active theme. Plotly doesn't read CSS vars itself.
+function chartFont(){
+  return getComputedStyle(document.documentElement).getPropertyValue("--chart-font").trim() || "#18181B";
+}
+function chartGrid(){
+  return getComputedStyle(document.documentElement).getPropertyValue("--chart-grid").trim() || "#E5E5E5";
+}
 
 // Distinct trace colors for multi-network WAN latency chart — Tailwind-style hues.
 const ISP_PALETTE = ["#2563EB","#DC2626","#16A34A","#9333EA","#D97706","#0891B2","#DB2777","#4F46E5"];
@@ -1679,10 +2099,10 @@ function renderHeatmap(d){
   Plotly.react(el,[trace],{
     margin:{l:80,r:20,t:10,b:40},
     paper_bgcolor:"transparent", plot_bgcolor:"transparent",
-    font:{color:CHART_FONT, size:12},
-    xaxis:{gridcolor:CHART_GRID, linecolor:CHART_GRID,
+    font:{color:chartFont(), size:12},
+    xaxis:{gridcolor:chartGrid(), linecolor:chartGrid(),
            range:[sinceMs, untilMs], type:"date"},
-    yaxis:{automargin:true, linecolor:CHART_GRID},
+    yaxis:{automargin:true, linecolor:chartGrid()},
   },{displayModeBar:false, responsive:true})
   .then(setupZoomSync)
   .catch(err => console.error("heatmap render", err));
@@ -1703,10 +2123,10 @@ function renderRtt(d){
   Plotly.react(el, traces, {
     margin:{l:50, r:20, t:30, b:40},
     paper_bgcolor:"transparent", plot_bgcolor:"transparent",
-    font:{color:CHART_FONT, size:12},
-    xaxis:{gridcolor:CHART_GRID, linecolor:CHART_GRID,
+    font:{color:chartFont(), size:12},
+    xaxis:{gridcolor:chartGrid(), linecolor:chartGrid(),
            range:[sinceMs, untilMs], type:"date"},
-    yaxis:{title:"ms", gridcolor:CHART_GRID, linecolor:CHART_GRID, rangemode:"tozero"},
+    yaxis:{title:"ms", gridcolor:chartGrid(), linecolor:chartGrid(), rangemode:"tozero"},
     showlegend:true,
     legend:{orientation:"h", y:1.15, bgcolor:"rgba(0,0,0,0)"},
   }, {displayModeBar:false, responsive:true})
@@ -1968,6 +2388,25 @@ document.addEventListener("click", ev => {
   const dp = document.getElementById("netpicker");
   if (dp.open && !dp.contains(ev.target)) dp.open = false;
 });
+
+function syncThemeToggleLabel(){
+  const isDark = document.documentElement.getAttribute("data-theme") === "dark";
+  const icon = document.getElementById("themeToggleIcon");
+  const label = document.getElementById("themeToggleLabel");
+  if (icon)  icon.textContent  = isDark ? "☀" : "🌙";
+  if (label) label.textContent = isDark ? "Light" : "Dark";
+}
+function toggleTheme(){
+  const root = document.documentElement;
+  const next = root.getAttribute("data-theme") === "dark" ? null : "dark";
+  if (next) root.setAttribute("data-theme", next);
+  else      root.removeAttribute("data-theme");
+  try { localStorage.setItem("nm.theme", next || "light"); } catch (e) {}
+  syncThemeToggleLabel();
+  // Re-render Plotly charts so they pick up the new font/grid colors.
+  load();
+}
+syncThemeToggleLabel();
 
 // Restore last-used window from localStorage (default = 24h via HTML `selected`).
 (function restoreHours(){
