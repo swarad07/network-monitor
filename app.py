@@ -948,6 +948,25 @@ INDEX_HTML = r"""
  .topbar .sub{color:var(--text-faint); font-size:14px}
  #lastUpdate{color:var(--text-faint); font-size:12px; white-space:nowrap}
 
+ /* Loading indicator — only visible while a user-triggered filter change
+    (window or networks) is fetching+rendering. The 10s auto-refresh does
+    NOT trigger this. Sits inline with the Historical controls. */
+ #loadingIndicator{
+   display:none; align-items:center; gap:6px;
+   font-size:12px; color:var(--text-faint);
+   padding:3px 10px; border:1px solid var(--border);
+   border-radius:999px; background:var(--surface);
+   white-space:nowrap; margin-left:auto;
+ }
+ body.is-loading #loadingIndicator{display:inline-flex}
+ #loadingIndicator .spinner{
+   width:10px; height:10px; border-radius:50%;
+   border:1.5px solid var(--border);
+   border-top-color:var(--accent-700);
+   animation:nm-spin .7s linear infinite;
+ }
+ @keyframes nm-spin{to{transform:rotate(360deg)}}
+
  /* Sticky connection details */
  .sticky-details{
    position:sticky; top:0; z-index:100;
@@ -1331,6 +1350,7 @@ INDEX_HTML = r"""
         <span id="zoomBadgeText"></span>
         <button onclick="resetZoom()">reset</button>
       </span>
+      <span id="loadingIndicator"><span class="spinner"></span>Updating…</span>
     </div>
 
     <h3>Outage timeline <span style="text-transform:none; letter-spacing:0; font-size:11px; color:var(--text-faint)">— green = healthy, amber = partial, red = down</span><span class="help" data-help="Color = fraction of probes that failed in each time bucket, per layer. Green = clean, amber = some loss, red = heavy loss. Unlike a pure up/down view, this surfaces partial loss — e.g. one of two WAN targets failing — so brownouts no longer hide. Hover any cell to see the loss %.">?</span></h3>
@@ -1493,7 +1513,7 @@ function netpickerCurrentOnly(){
 }
 function onNetSelectionChange(){
   updateNetpickerSummary(window.__currentNetworkLabel);
-  load();
+  load({userTriggered: true});
 }
 
 function renderTop(d){
@@ -1819,7 +1839,7 @@ const zoomState = { from_ts: null, to_ts: null };
 function resetZoom(){
   zoomState.from_ts = null;
   zoomState.to_ts = null;
-  load();
+  load({userTriggered: true});
 }
 let refetchTimer = null;
 function debouncedLoad(){
@@ -1862,7 +1882,32 @@ function safeRun(name, fn){
   try { fn(); } catch (err) { console.error("render error in " + name + ":", err); }
 }
 
-async function load(){
+let loadingRevealTimer = null;
+let loadingDepth = 0;
+function beginLoading(){
+  loadingDepth++;
+  // Delay reveal so quick auto-refreshes (usually <150ms) don't flash the
+  // spinner. Slower fetches (long windows, all networks) will trip it.
+  if (loadingDepth === 1 && loadingRevealTimer == null){
+    loadingRevealTimer = setTimeout(() => {
+      document.body.classList.add("is-loading");
+      loadingRevealTimer = null;
+    }, 150);
+  }
+}
+function endLoading(){
+  loadingDepth = Math.max(0, loadingDepth - 1);
+  if (loadingDepth === 0){
+    if (loadingRevealTimer != null){
+      clearTimeout(loadingRevealTimer);
+      loadingRevealTimer = null;
+    }
+    document.body.classList.remove("is-loading");
+  }
+}
+
+async function load(opts){
+  const userTriggered = !!(opts && opts.userTriggered);
   if (typeof Plotly === "undefined"){
     console.warn("Plotly not loaded yet — charts will render once it arrives.");
   }
@@ -1876,12 +1921,14 @@ async function load(){
     params.set("to_ts", zoomState.to_ts);
   }
 
+  if (userTriggered) beginLoading();
   let d;
   try {
     const r = await fetch("/api/status?" + params.toString());
     d = await r.json();
   } catch (err) {
     console.error("dashboard fetch failed:", err);
+    if (userTriggered) endLoading();
     return;
   }
   window.__currentNetworkLabel = d.current_network_label;
@@ -1914,6 +1961,7 @@ async function load(){
       .formatToParts(now).find(p => p.type === "timeZoneName")?.value || "";
     document.getElementById("lastUpdate").textContent = `Updated at ${time} ${tz}`.trim();
   }
+  if (userTriggered) endLoading();
 }
 
 document.addEventListener("click", ev => {
